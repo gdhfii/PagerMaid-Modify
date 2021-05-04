@@ -1,14 +1,19 @@
 """ PagerMaid event listener. """
 
+import sys, sentry_sdk, re
+
 from telethon import events
 from telethon.errors import MessageTooLongError
 from distutils2.util import strtobool
 from traceback import format_exc
 from time import gmtime, strftime, time
-from sys import exc_info
 from telethon.events import StopPropagation
-from pagermaid import bot, config, help_messages
-from pagermaid.utils import attach_log
+from pagermaid import bot, config, help_messages, logs
+from pagermaid.utils import attach_report, lang
+
+
+def noop(*args, **kw):
+    pass
 
 
 def listener(**args):
@@ -19,9 +24,10 @@ def listener(**args):
     pattern = args.get('pattern', None)
     diagnostics = args.get('diagnostics', True)
     ignore_edited = args.get('ignore_edited', False)
+    is_plugin = args.get('is_plugin', True)
     if command is not None:
         if command in help_messages:
-            raise ValueError(f"出错了呜呜呜 ~ 命令 \"{command}\" 已经被注册。")
+            raise ValueError(f"{lang('error_prefix')} {lang('command')} \"{command}\" {lang('has_reg')}")
         pattern = fr"^-{command}(?: |$)([\s\S]*)"
     if pattern is not None and not pattern.startswith('(?i)'):
         args['pattern'] = f"(?i){pattern}"
@@ -37,6 +43,8 @@ def listener(**args):
         del args['description']
     if 'parameters' in args:
         del args['parameters']
+    if 'is_plugin' in args:
+        del args['is_plugin']
 
     def decorator(function):
 
@@ -55,10 +63,12 @@ def listener(**args):
             except StopPropagation:
                 raise StopPropagation
             except MessageTooLongError:
-                await context.edit("出错了呜呜呜 ~ 生成的输出太长，无法显示。")
-            except BaseException:
+                await context.edit(lang('too_long'))
+            except BaseException as e:
+                exc_info = sys.exc_info()[1]
+                exc_format = format_exc()
                 try:
-                    await context.edit("出错了呜呜呜 ~ 执行此命令时发生错误。")
+                    await context.edit(lang('run_error'))
                 except BaseException:
                     pass
                 if not diagnostics:
@@ -70,10 +80,18 @@ def listener(**args):
                              f"# Message: \n-----BEGIN TARGET MESSAGE-----\n" \
                              f"{context.text}\n-----END TARGET MESSAGE-----\n" \
                              f"# Traceback: \n-----BEGIN TRACEBACK-----\n" \
-                             f"{str(format_exc())}\n-----END TRACEBACK-----\n" \
-                             f"# Error: \"{str(exc_info()[1])}\". \n"
-                    await attach_log(report, -1001441461877, f"exception.{time()}.pagermaid", None,
-                                     "Error report generated.")
+                             f"{str(exc_format)}\n-----END TRACEBACK-----\n" \
+                             f"# Error: \"{str(exc_info)}\". \n"
+                    await attach_report(report, f"exception.{time()}.pagermaid", None,
+                                        "Error report generated.")
+                    try:
+                        sentry_sdk.set_context("Target", {"ChatID": str(context.chat_id), "UserID": str(context.sender_id), "Msg": context.text})
+                        sentry_sdk.set_tag('com', re.findall("\w+",str.lower(context.text.split()[0]))[0])
+                        sentry_sdk.capture_exception(e)
+                    except:
+                        logs.info(
+                            lang('report_error')
+                        )
 
         if not ignore_edited:
             bot.add_event_handler(handler, events.MessageEdited(**args))
@@ -81,11 +99,15 @@ def listener(**args):
 
         return handler
 
+    if not is_plugin and 'disabled_cmd' in config:
+        if config['disabled_cmd'].count(command) != 0:
+            return noop
+
     if description is not None and command is not None:
         if parameters is None:
             parameters = ""
         help_messages.update({
-            f"{command}": f"**使用方法:** `-{command} {parameters}`\
+            f"{command}": f"**{lang('use_method')}:** `-{command} {parameters}`\
             \n{description}"
         })
 
